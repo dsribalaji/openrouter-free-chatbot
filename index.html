@@ -28,6 +28,21 @@
           <button id="new-chat-btn" type="button" class="btn btn-secondary">New chat</button>
           <button id="clear-chat-btn" type="button" class="btn btn-secondary">Clear chat</button>
         </div>
+
+        <div class="sidebar-section backend-section">
+          <h3 class="sidebar-label">Data analysis</h3>
+          <label for="backend-url" class="sidebar-label">Backend URL</label>
+          <input id="backend-url" name="backend-url" type="url" placeholder="http://localhost:8000" autocomplete="off" spellcheck="false">
+          <label for="backend-key" class="sidebar-label">Backend key (optional)</label>
+          <input id="backend-key" name="backend-key" type="password" autocomplete="off" placeholder="Only if the backend requires one">
+          <button id="save-backend-btn" type="button" class="btn btn-secondary">Save backend settings</button>
+          <label for="dataset-file" class="sidebar-label">Dataset</label>
+          <input id="dataset-file" name="dataset-file" type="file" accept=".csv,.xlsx,.xls">
+          <label for="analysis-question" class="sidebar-label">Question</label>
+          <textarea id="analysis-question" name="analysis-question" rows="2" placeholder="e.g. What drives revenue?"></textarea>
+          <button id="analyze-btn" type="button" class="btn btn-accent">Analyze</button>
+          <div id="analysis-status" class="analysis-status" aria-live="polite"></div>
+        </div>
       </div>
 
       <footer class="sidebar-footer">

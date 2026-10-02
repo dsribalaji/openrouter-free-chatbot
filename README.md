@@ -30,3 +30,18 @@ external assets — the only network calls at runtime go to `openrouter.ai`.
 - `app.js` — key management, model fetching, streaming chat logic
 - `DESIGN_CONTRACT.md` — the build contract the engineering team worked to
 - `decision.md` — why the repo is shaped this way
+
+## Data analysis mode
+
+The sidebar's **Data analysis** section connects the chatbot to the
+serverless-analyst backend (SB's agentic data-analysis platform):
+
+1. Set the **Backend URL** (default `http://localhost:8000` for local runs) and
+   the optional **Backend key**, then save.
+2. Choose a CSV/Excel dataset, type your question, and hit **Analyze**.
+3. The chatbot uploads the file, starts the 8-step agentic pipeline, shows live
+   progress, and renders the final report in the chat when done.
+
+Run the backend locally with:
+`SLA_BLOB_BACKEND=local uvicorn slanalyst.api.app:app --reload`
+from `~/workspace/serverless-analyst` (see its README for cloud deploys).

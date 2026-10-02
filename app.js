@@ -781,4 +781,154 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   loadModels();
+
+  // ---- Data-analysis mode (drives the serverless-analyst backend) ----
+  const BACKEND_URL_KEY = "orcb_backend_url";
+  const BACKEND_KEY_KEY = "orcb_backend_key";
+  const DEFAULT_BACKEND_URL = "http://localhost:8000";
+
+  const backendUrlInput = document.getElementById("backend-url");
+  const backendKeyInput = document.getElementById("backend-key");
+  const saveBackendBtn = document.getElementById("save-backend-btn");
+  const datasetFileInput = document.getElementById("dataset-file");
+  const analysisQuestionInput = document.getElementById("analysis-question");
+  const analyzeBtn = document.getElementById("analyze-btn");
+  const analysisStatus = document.getElementById("analysis-status");
+  let analysisTimer = null;
+
+  function getBackendUrl() {
+    return (localStorage.getItem(BACKEND_URL_KEY) || DEFAULT_BACKEND_URL).replace(/\/+$/, "");
+  }
+  function getBackendKey() {
+    return localStorage.getItem(BACKEND_KEY_KEY) || "";
+  }
+  function backendHeaders() {
+    const headers = {};
+    const key = getBackendKey();
+    if (key) headers["X-API-Key"] = key;
+    return headers;
+  }
+  function setAnalysisStatus(text) {
+    if (analysisStatus) analysisStatus.textContent = text || "";
+  }
+  function stopAnalysisPolling() {
+    if (analysisTimer) { clearInterval(analysisTimer); analysisTimer = null; }
+  }
+  function finishAnalysis() {
+    stopAnalysisPolling();
+    if (analyzeBtn) analyzeBtn.disabled = false;
+  }
+  async function backendErrorDetail(res) {
+    try {
+      const data = await res.json();
+      if (data && typeof data.detail === "string" && data.detail) return data.detail;
+    } catch (_) {}
+    return "Backend request failed (" + res.status + ")";
+  }
+  async function backendFetch(path, options) {
+    try {
+      return await fetch(getBackendUrl() + path, options);
+    } catch (_) {
+      return null;
+    }
+  }
+  function handleUnreachable() {
+    setAnalysisStatus("Backend unreachable at " + getBackendUrl() + " — is it running?");
+    showToast("Backend unreachable", true);
+  }
+  async function handleBackendResponse(res, actionLabel) {
+    if (res.status === 401) {
+      setAnalysisStatus("Backend rejected the key (401).");
+      showToast("Backend rejected the key (401).", true);
+      return { ok: false };
+    }
+    if (!res.ok) {
+      const detail = await backendErrorDetail(res);
+      setAnalysisStatus(actionLabel + " failed.");
+      showToast(detail, true);
+      return { ok: false };
+    }
+    return { ok: true, data: await res.json() };
+  }
+
+  if (backendUrlInput) backendUrlInput.value = localStorage.getItem(BACKEND_URL_KEY) || DEFAULT_BACKEND_URL;
+  if (backendKeyInput) backendKeyInput.value = getBackendKey();
+
+  if (saveBackendBtn) {
+    saveBackendBtn.addEventListener("click", () => {
+      localStorage.setItem(BACKEND_URL_KEY, (backendUrlInput.value || "").trim().replace(/\/+$/, ""));
+      localStorage.setItem(BACKEND_KEY_KEY, (backendKeyInput.value || "").trim());
+      showToast("Backend settings saved");
+    });
+  }
+
+  async function runAnalysis() {
+    const file = datasetFileInput && datasetFileInput.files ? datasetFileInput.files[0] : null;
+    const question = analysisQuestionInput ? analysisQuestionInput.value.trim() : "";
+    if (!getBackendUrl()) { showToast("Set the backend URL first", true); return; }
+    if (!file) { showToast("Choose a dataset file first", true); return; }
+    if (!question) { showToast("Enter an analysis question", true); return; }
+
+    analyzeBtn.disabled = true;
+    stopAnalysisPolling();
+
+    setAnalysisStatus("Uploading dataset…");
+    const form = new FormData();
+    form.append("file", file);
+    let res = await backendFetch("/datasets", { method: "POST", headers: backendHeaders(), body: form });
+    if (!res) { handleUnreachable(); finishAnalysis(); return; }
+    let out = await handleBackendResponse(res, "Upload");
+    if (!out.ok) { finishAnalysis(); return; }
+    const datasetId = out.data.dataset_id;
+
+    setAnalysisStatus("Starting analysis…");
+    res = await backendFetch("/datasets/" + encodeURIComponent(datasetId) + "/analyses", {
+      method: "POST",
+      headers: Object.assign({ "Content-Type": "application/json" }, backendHeaders()),
+      body: JSON.stringify({ question: question }),
+    });
+    if (!res) { handleUnreachable(); finishAnalysis(); return; }
+    out = await handleBackendResponse(res, "Analysis start");
+    if (!out.ok) { finishAnalysis(); return; }
+    const runId = out.data.run_id;
+
+    analysisTimer = setInterval(async () => {
+      const sres = await backendFetch("/analyses/" + encodeURIComponent(runId), { headers: backendHeaders() });
+      if (!sres) { handleUnreachable(); finishAnalysis(); return; }
+      const sOut = await handleBackendResponse(sres, "Status check");
+      if (!sOut.ok) { finishAnalysis(); return; }
+      const status = sOut.data;
+      const nodes = status.nodes || {};
+      const names = Object.keys(nodes);
+      const terminal = ["complete", "failed", "degraded", "skipped"];
+      const finished = names.filter((n) => terminal.indexOf(nodes[n]) !== -1).length;
+      setAnalysisStatus(finished + "/" + names.length + " steps complete…");
+      if (status.status === "succeeded") {
+        finishAnalysis();
+        const rres = await backendFetch("/analyses/" + encodeURIComponent(runId) + "/report", { headers: backendHeaders() });
+        if (!rres || !rres.ok) {
+          setAnalysisStatus("Failed.");
+          showToast("Could not fetch the analysis report", true);
+          return;
+        }
+        const report = await rres.json();
+        const content = "## Data analysis report\n\n" + (report.report_markdown || "");
+        chatMessages.appendChild(renderAssistantMessage(content));
+        updateEmptyState(true);
+        history.push({ role: "assistant", content: content });
+        try { localStorage.setItem(HISTORY_KEY, JSON.stringify(history)); } catch (_) {}
+        scrollToBottom();
+        setAnalysisStatus("Done.");
+        showToast("Analysis complete");
+      } else if (status.status === "failed") {
+        finishAnalysis();
+        setAnalysisStatus("Failed.");
+        showToast("Analysis failed — check the backend logs", true);
+      }
+    }, 3000);
+  }
+
+  if (analyzeBtn) {
+    analyzeBtn.addEventListener("click", runAnalysis);
+  }
 });

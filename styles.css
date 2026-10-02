@@ -798,3 +798,41 @@ textarea#user-input:disabled {
     max-width: 140px;
   }
 }
+
+/* Data-analysis mode */
+.sidebar-section.backend-section {
+  border-top: 1px solid var(--border);
+  padding-top: var(--space-4);
+}
+
+.backend-section input,
+.backend-section textarea {
+  width: 100%;
+  background-color: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  padding: var(--space-2) var(--space-3);
+  font-size: 0.875rem;
+  font-family: inherit;
+  outline: none;
+}
+
+.backend-section input:focus-visible,
+.backend-section textarea:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-color: var(--accent);
+}
+
+.backend-section textarea {
+  resize: vertical;
+  min-height: 3.25rem;
+}
+
+.analysis-status {
+  font-size: 0.8125rem;
+  color: var(--muted);
+  line-height: 1.4;
+  min-height: 1.25em;
+}

@@ -1,3 +1,15 @@
+## 2026-10-02 — Data-analysis mode added: chatbot drives the serverless-analyst backend (SB, ~20:00 IST)
+- **Decided by:** SB ("Set this up for my chatbot we have done earlier")
+- **Decision:** new sidebar section (backend URL/key settings, dataset upload,
+  question, live progress) that calls the serverless-analyst API
+  (upload → analyze → poll → report) and renders the report in-chat. Backend
+  gained CORS + optional X-API-Key auth for browser use. Backend URL defaults
+  to local dev; nothing is deployed yet — a public backend needs SB's cloud
+  choice and credentials.
+- **Rationale:** reuses the existing chat UI/rendering; backend stays
+  cloud-agnostic and SB-controlled.
+- **Status:** active
+
 # decision.md
 
 Newest first. Records why this repo is the way it is; git history records

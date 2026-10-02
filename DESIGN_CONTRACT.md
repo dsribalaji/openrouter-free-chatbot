@@ -144,3 +144,48 @@ thinkingmachines/inkling:free
 - Accessible: labels on all inputs, buttons have discernible text, focus-visible
   outlines in --accent, `aria-live="polite"` on `#toast`.
 - All user-visible copy in plain English, formal-warm, no emojis.
+
+## Data-analysis mode (added 2026-10-02) — chatbot drives the serverless-analyst backend
+
+The chatbot gains an "Analyze" flow in the sidebar that uploads a dataset to the
+serverless-analyst backend, starts an agentic analysis, polls progress, and
+renders the final report as an assistant message. The backend URL/key are
+user-configurable (the backend is not deployed yet; default points at local dev).
+
+Sidebar section `.sidebar-section.backend-section` (after the chat-buttons
+section, before the footer):
+- `h3` "Data analysis" (same visual weight as other `.sidebar-label`s)
+- `label` "Backend URL" + `input#backend-url` (type=url, placeholder "http://localhost:8000")
+- `label` "Backend key (optional)" + `input#backend-key` (type=password, autocomplete="off",
+  placeholder "Only if the backend requires one")
+- `button#save-backend-btn` ("Save backend settings", secondary/ghost style)
+- `label` "Dataset" + `input#dataset-file` (type=file, accept=".csv,.xlsx,.xls")
+- `label` "Question" + `textarea#analysis-question` (rows=2,
+  placeholder "e.g. What drives revenue?")
+- `button#analyze-btn` ("Analyze", --accent primary style)
+- `div#analysis-status` (muted small text, aria-live="polite", initial text "")
+
+Behavior (inside the existing DOMContentLoaded closure; reuse showToast,
+renderAssistantMessage, scrollToBottom — do not duplicate rendering):
+- Storage: `orcb_backend_url` (default "http://localhost:8000"),
+  `orcb_backend_key` (default ""). Populate inputs on load.
+- `#save-backend-btn`: trim trailing "/" from URL, persist both values,
+  toast "Backend settings saved".
+- `#analyze-btn`: require a chosen file and a non-empty question; require a
+  backend URL. Disable the button while running.
+  - Request headers: include `X-API-Key: <key>` only when a key is saved.
+  - `POST {url}/datasets` (FormData `file`) → `{dataset_id}`.
+    Network failure → status text "Backend unreachable at {url} — is it running?",
+    error toast, re-enable. HTTP 401 → status "Backend rejected the key (401).",
+    error toast, re-enable. Other non-2xx → toast the backend's detail.
+  - `POST {url}/datasets/{id}/analyses` with `{question}` → `{run_id}`.
+  - Poll `GET {url}/analyses/{run_id}` every 3000ms: status
+    "{done}/{total} steps complete…". On `"succeeded"`: stop polling,
+    `GET {url}/analyses/{run_id}/report` → renderAssistantMessage with
+    `"## Data analysis report\n\n" + report_markdown`, status "Done.",
+    toast "Analysis complete". On `"failed"`: stop polling, error toast
+    "Analysis failed — check the backend logs", status "Failed.".
+- Styling: inputs/textarea full-width, --panel-2 background, 1px --border,
+  --radius-sm; section separated by a top border like other sections; the
+  file input keeps the native control (no custom styling beyond width).
+- No emojis. All copy plain English.
