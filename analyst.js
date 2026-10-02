@@ -2,548 +2,586 @@
   "use strict";
 
   /**
-   * Robust CSV parser supporting quotes, escaped quotes (""),
-   * commas and newlines inside quotes, and \r\n endings.
-   * Throws Error("Could not parse the CSV…") on empty or unparseable input.
+   * Enforce pacing between OpenRouter LLM calls (1200ms).
    */
-  function parseCSV(text) {
-    if (typeof text !== "string" || !text.trim()) {
-      throw new Error("Could not parse the CSV: input is empty");
-    }
+  let lastCallTime = 0;
 
-    const rows = [];
-    let currentRow = [];
-    let currentField = "";
-    let inQuotes = false;
-    let i = 0;
-    const len = text.length;
-
-    while (i < len) {
-      const char = text[i];
-
-      if (inQuotes) {
-        if (char === '"') {
-          if (i + 1 < len && text[i + 1] === '"') {
-            currentField += '"';
-            i += 2;
-            continue;
-          } else {
-            inQuotes = false;
-            i++;
-            continue;
-          }
-        } else {
-          currentField += char;
-          i++;
-          continue;
-        }
-      } else {
-        if (char === '"') {
-          inQuotes = true;
-          i++;
-          continue;
-        } else if (char === ",") {
-          currentRow.push(currentField);
-          currentField = "";
-          i++;
-          continue;
-        } else if (char === "\r") {
-          if (i + 1 < len && text[i + 1] === "\n") {
-            i++;
-          }
-          currentRow.push(currentField);
-          currentField = "";
-          rows.push(currentRow);
-          currentRow = [];
-          i++;
-          continue;
-        } else if (char === "\n") {
-          currentRow.push(currentField);
-          currentField = "";
-          rows.push(currentRow);
-          currentRow = [];
-          i++;
-          continue;
-        } else {
-          currentField += char;
-          i++;
-          continue;
-        }
-      }
-    }
-
-    if (inQuotes) {
-      throw new Error("Could not parse the CSV: unclosed quote");
-    }
-
-    if (currentField.length > 0 || currentRow.length > 0) {
-      currentRow.push(currentField);
-      rows.push(currentRow);
-    }
-
-    // Remove empty trailing lines
-    while (rows.length > 1) {
-      const lastRow = rows[rows.length - 1];
-      if (lastRow.length === 0 || (lastRow.length === 1 && lastRow[0].trim() === "")) {
-        rows.pop();
-      } else {
-        break;
-      }
-    }
-
-    if (rows.length === 0) {
-      throw new Error("Could not parse the CSV: no rows found");
-    }
-
-    const rawColumns = rows[0];
-    if (!rawColumns || rawColumns.length === 0 || rawColumns.every((c) => !c.trim())) {
-      throw new Error("Could not parse the CSV: header row is empty");
-    }
-
-    const columns = rawColumns.map((col, idx) => {
-      const trimmed = col.trim();
-      return trimmed.length > 0 ? trimmed : "col_" + (idx + 1);
+  function sleep(ms) {
+    return new Promise(function (resolve) {
+      setTimeout(resolve, ms);
     });
+  }
 
-    const dataRows = rows.slice(1);
-    const normalizedRows = dataRows.map((row) => {
-      const res = [];
-      for (let c = 0; c < columns.length; c++) {
-        res.push(row[c] !== undefined ? row[c] : "");
-      }
-      return res;
-    });
-
-    return {
-      columns: columns,
-      rows: normalizedRows,
-      rowCount: normalizedRows.length
-    };
+  async function paceLLMCall() {
+    const now = Date.now();
+    const elapsed = now - lastCallTime;
+    if (elapsed < 1200) {
+      await sleep(1200 - elapsed);
+    }
+    lastCallTime = Date.now();
   }
 
   /**
-   * Deterministic dataset profiling without LLM.
-   * Returns {rowCount, columns: [{name, dtype, nullPct, unique}], numericSummaries: {col: {min, max, mean}}, sample: first 5 rows as objects}
+   * Call OpenRouter API with 1200ms pacing and HTTP 429 retry.
    */
-  function profileDataset(ds) {
-    const rowCount = ds.rowCount;
-    const columnsProfile = [];
-    const numericSummaries = {};
+  async function callLLM(userText) {
+    await paceLLMCall();
 
-    ds.columns.forEach((colName, cIdx) => {
-      const rawValues = ds.rows.map((r) => r[cIdx]);
-      let nonEmptyCount = 0;
-      let numberCount = 0;
-      let dateCount = 0;
-      const uniqueSet = new Set();
-
-      for (let r = 0; r < rowCount; r++) {
-        const val = rawValues[r];
-        uniqueSet.add(val);
-        const str = (val !== null && val !== undefined) ? String(val).trim() : "";
-        if (str !== "") {
-          nonEmptyCount++;
-          const num = Number(str);
-          if (!isNaN(num) && isFinite(num)) {
-            numberCount++;
-          }
-          const parsedDate = Date.parse(str);
-          if (!isNaN(parsedDate)) {
-            dateCount++;
-          }
-        }
-      }
-
-      let dtype = "text";
-      if (nonEmptyCount > 0 && numberCount === nonEmptyCount) {
-        dtype = "number";
-      } else if (nonEmptyCount > 0 && (dateCount / nonEmptyCount) > 0.8) {
-        dtype = "date";
-      } else {
-        dtype = "text";
-      }
-
-      const nullCount = rowCount - nonEmptyCount;
-      const nullPct = rowCount > 0 ? Math.round((nullCount / rowCount) * 1000) / 1000 : 0;
-
-      columnsProfile.push({
-        name: colName,
-        dtype: dtype,
-        nullPct: nullPct,
-        unique: uniqueSet.size
-      });
-
-      if (dtype === "number") {
-        let min = Infinity;
-        let max = -Infinity;
-        let sum = 0;
-        let count = 0;
-        for (let r = 0; r < rowCount; r++) {
-          const val = rawValues[r];
-          if (val !== null && val !== undefined && String(val).trim() !== "") {
-            const num = parseFloat(val);
-            if (!isNaN(num) && isFinite(num)) {
-              if (num < min) min = num;
-              if (num > max) max = num;
-              sum += num;
-              count++;
-            }
-          }
-        }
-        if (count > 0) {
-          numericSummaries[colName] = {
-            min: min,
-            max: max,
-            mean: Math.round((sum / count) * 1000) / 1000
-          };
-        } else {
-          numericSummaries[colName] = { min: 0, max: 0, mean: 0 };
-        }
-      }
-    });
-
-    const sample = ds.rows.slice(0, 5).map((row) => {
-      const obj = {};
-      ds.columns.forEach((colName, cIdx) => {
-        obj[colName] = row[cIdx] !== undefined ? row[cIdx] : "";
-      });
-      return obj;
-    });
-
-    return {
-      rowCount: rowCount,
-      columns: columnsProfile,
-      numericSummaries: numericSummaries,
-      sample: sample
-    };
-  }
-
-  /**
-   * Call OpenRouter LLM using saved orcb_api_key and current #model-select value.
-   */
-  async function callLLM(systemPrompt, userPrompt) {
-    const key = localStorage.getItem("orcb_api_key");
+    const key = (typeof localStorage !== "undefined" && localStorage.getItem("orcb_api_key")) || "";
     if (!key) {
       throw new Error("Add your OpenRouter API key first.");
     }
-    const modelEl = document.getElementById("model-select");
-    const model = modelEl ? modelEl.value : "";
-    if (!model) {
-      throw new Error("Please select a model first.");
-    }
 
-    const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    const modelEl = typeof document !== "undefined" ? document.getElementById("model-select") : null;
+    const model = (modelEl && modelEl.value) || "";
+
+    const origin = (typeof window !== "undefined" && window.location && window.location.origin)
+      ? window.location.origin
+      : "http://localhost";
+
+    const fetchOptions = {
       method: "POST",
       headers: {
         "Authorization": "Bearer " + key,
         "Content-Type": "application/json",
-        "HTTP-Referer": (window.location && window.location.origin) || "http://localhost",
+        "HTTP-Referer": origin,
         "X-Title": "Ruby Free Chatbot"
       },
       body: JSON.stringify({
         model: model,
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userPrompt }
-        ],
+        messages: [{ role: "user", content: userText }],
         temperature: 0.2,
         max_tokens: 4000
       })
-    });
+    };
 
-    if (!res.ok) {
-      let msg = "";
-      try {
-        const errJson = await res.json();
-        msg = (errJson && errJson.error && errJson.error.message) || (errJson && errJson.message) || "";
-      } catch (_) {}
-      if (!msg) {
-        msg = "OpenRouter request failed with HTTP " + res.status;
-      }
-      throw new Error(msg);
+    let response = await fetch("https://openrouter.ai/api/v1/chat/completions", fetchOptions);
+
+    if (response.status === 429) {
+      await sleep(5000);
+      lastCallTime = Date.now();
+      response = await fetch("https://openrouter.ai/api/v1/chat/completions", fetchOptions);
     }
 
-    const data = await res.json();
+    if (!response.ok) {
+      let bodyText = "";
+      try {
+        bodyText = await response.text();
+      } catch (_) {}
+      throw new Error("OpenRouter error " + response.status + ": " + bodyText.slice(0, 200));
+    }
+
+    const data = await response.json();
     return (data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || "";
   }
 
   /**
-   * Helper to parse JSON defensively from LLM output, stripping ``` fences.
+   * Parse JSON defensively from LLM output (fenced or unfenced).
    */
   function parseJsonDefensively(text) {
     if (typeof text !== "string") return text;
-    let clean = text.trim();
-    if (clean.startsWith("```")) {
-      clean = clean.replace(/^```(?:json)?\s*/i, "");
-      clean = clean.replace(/\s*```$/, "");
-      clean = clean.trim();
-    }
-    const match = clean.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
-    if (match) {
-      clean = match[1].trim();
-    }
+    const clean = text.trim();
     try {
       return JSON.parse(clean);
-    } catch (err) {
-      const arrStart = clean.indexOf("[");
-      const arrEnd = clean.lastIndexOf("]");
-      if (arrStart !== -1 && arrEnd > arrStart) {
-        try {
-          return JSON.parse(clean.slice(arrStart, arrEnd + 1));
-        } catch (_) {}
+    } catch (_) {}
+
+    const match = clean.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+    if (match) {
+      try {
+        return JSON.parse(match[1].trim());
+      } catch (_) {}
+    }
+
+    const firstBrace = clean.indexOf("{");
+    const lastBrace = clean.lastIndexOf("}");
+    if (firstBrace !== -1 && lastBrace > firstBrace) {
+      try {
+        return JSON.parse(clean.slice(firstBrace, lastBrace + 1));
+      } catch (_) {}
+    }
+
+    const firstBracket = clean.indexOf("[");
+    const lastBracket = clean.lastIndexOf("]");
+    if (firstBracket !== -1 && lastBracket > firstBracket) {
+      try {
+        return JSON.parse(clean.slice(firstBracket, lastBracket + 1));
+      } catch (_) {}
+    }
+
+    return JSON.parse(clean);
+  }
+
+  /**
+   * Validate agent registry:
+   * - Throw on duplicate agent names.
+   * - Throw on any depends_on / depends_on_any name that is not a registered agent.
+   * - Throw on dependency cycles using Kahn's algorithm (treating depends_on_any as OR-edges).
+   */
+  /**
+   * Effective AND-dependencies: declared depends_on plus every agent referenced
+   * by an `agent:<name>` input binding. The repo's own validator requires that
+   * prompts only reference declared inputs; deriving the ordering from the
+   * bindings enforces that invariant at runtime.
+   */
+  function effectiveAndDeps(agent) {
+    const deps = [];
+    const seen = new Set();
+    const push = function (d) {
+      if (typeof d === "string" && d && !seen.has(d)) {
+        seen.add(d);
+        deps.push(d);
       }
-      const objStart = clean.indexOf("{");
-      const objEnd = clean.lastIndexOf("}");
-      if (objStart !== -1 && objEnd > objStart) {
-        try {
-          return JSON.parse(clean.slice(objStart, objEnd + 1));
-        } catch (_) {}
+    };
+    (Array.isArray(agent.depends_on) ? agent.depends_on : []).forEach(push);
+    (Array.isArray(agent.inputs) ? agent.inputs : []).forEach(function (input) {
+      if (input && typeof input.source === "string" && input.source.indexOf("agent:") === 0) {
+        push(input.source.slice(6));
       }
-      throw err;
+    });
+    return deps;
+  }
+
+  function effectiveOrDeps(agent) {
+    const deps = [];
+    const orDeps = Array.isArray(agent.depends_on_any) ? agent.depends_on_any : [];
+    orDeps.forEach(function (dep) {
+      if (Array.isArray(dep)) {
+        dep.forEach(function (d) { if (deps.indexOf(d) === -1) deps.push(d); });
+      } else if (deps.indexOf(dep) === -1) {
+        deps.push(dep);
+      }
+    });
+    return deps;
+  }
+
+  function validateRegistry(agents) {
+    if (!Array.isArray(agents)) {
+      throw new Error("Agent registry must be an array of agents.");
+    }
+
+    const registeredNames = new Set();
+    for (const agent of agents) {
+      if (!agent || typeof agent.name !== "string" || !agent.name.trim()) {
+        throw new Error("Agent registry contains an entry missing a valid name.");
+      }
+      if (registeredNames.has(agent.name)) {
+        throw new Error("Duplicate agent name: " + agent.name);
+      }
+      registeredNames.add(agent.name);
+    }
+
+    for (const agent of agents) {
+      const andDeps = effectiveAndDeps(agent);
+      for (const dep of andDeps) {
+        if (!registeredNames.has(dep)) {
+          throw new Error("Unknown dependency: agent '" + agent.name + "' depends on unknown agent '" + dep + "'");
+        }
+      }
+      const orDeps = effectiveOrDeps(agent);
+      for (const dep of orDeps) {
+        if (!registeredNames.has(dep)) {
+          throw new Error("Unknown dependency: agent '" + agent.name + "' depends_on_any unknown agent '" + dep + "'");
+        }
+      }
+    }
+
+    const placed = new Set();
+    let remaining = agents.slice();
+
+    while (remaining.length > 0) {
+      const ready = [];
+      const nextRemaining = [];
+
+      for (const agent of remaining) {
+        const andDeps = effectiveAndDeps(agent);
+        const orDeps = effectiveOrDeps(agent);
+
+        const andSatisfied = andDeps.every(function (dep) {
+          return placed.has(dep);
+        });
+        const orSatisfied = orDeps.length === 0 || orDeps.some(function (dep) {
+          return placed.has(dep);
+        });
+
+        if (andSatisfied && orSatisfied) {
+          ready.push(agent);
+        } else {
+          nextRemaining.push(agent);
+        }
+      }
+
+      if (ready.length === 0) {
+        const cycleAgents = nextRemaining.map(function (a) {
+          return a.name;
+        }).join(", ");
+        throw new Error("Dependency cycle detected: " + cycleAgents);
+      }
+
+      for (const agent of ready) {
+        placed.add(agent.name);
+      }
+      remaining = nextRemaining;
     }
   }
 
   /**
-   * Run the 9-step analytical pipeline.
+   * Compute execution tiers using Kahn layering.
+   * An agent is ready for the next tier when every depends_on member is in an earlier tier
+   * AND (depends_on_any is empty OR at least one member is in an earlier tier).
+   * Returns array of tiers (each an array of agent objects, registry order preserved).
+   * Throws on deadlock (agents left unassigned).
+   */
+  function computeTiers(agents) {
+    const tiers = [];
+    const placed = new Set();
+    let remaining = agents.slice();
+
+    while (remaining.length > 0) {
+      const currentTier = [];
+      const nextRemaining = [];
+
+      for (const agent of remaining) {
+        const andDeps = effectiveAndDeps(agent);
+        const orDeps = effectiveOrDeps(agent);
+
+        const andSatisfied = andDeps.every(function (dep) {
+          return placed.has(dep);
+        });
+        const orSatisfied = orDeps.length === 0 || orDeps.some(function (dep) {
+          return placed.has(dep);
+        });
+
+        if (andSatisfied && orSatisfied) {
+          currentTier.push(agent);
+        } else {
+          nextRemaining.push(agent);
+        }
+      }
+
+      if (currentTier.length === 0) {
+        const unassigned = nextRemaining.map(function (a) {
+          return a.name;
+        }).join(", ");
+        throw new Error("Deadlock: agents left unassigned: " + unassigned);
+      }
+
+      tiers.push(currentTier);
+      for (const agent of currentTier) {
+        placed.add(agent.name);
+      }
+      remaining = nextRemaining;
+    }
+
+    return tiers;
+  }
+
+  /**
+   * Resolve input values for an agent based on input definitions.
+   */
+  function resolveInputs(agent, question, artifacts) {
+    const inputs = {};
+    const agentInputs = Array.isArray(agent.inputs) ? agent.inputs : [];
+
+    for (const input of agentInputs) {
+      if (!input || typeof input.name !== "string") continue;
+      const inputName = input.name;
+      const source = input.source;
+
+      if (source === "user") {
+        inputs[inputName] = question;
+      } else if (source === "system") {
+        if (inputName === "DATASET_PROFILE") {
+          const profilerArtifact = artifacts["dataset-profiler"];
+          const rawProfile = profilerArtifact && profilerArtifact.profile;
+          let profileObj = rawProfile;
+          if (typeof rawProfile === "string") {
+            try {
+              profileObj = JSON.parse(rawProfile);
+            } catch (_) {
+              profileObj = rawProfile;
+            }
+          }
+          inputs[inputName] = (typeof profileObj === "object" && profileObj !== null)
+            ? JSON.stringify(profileObj, null, 2)
+            : JSON.stringify(profileObj || {}, null, 2);
+        } else if (inputName === "KNOWLEDGE") {
+          const knowledge = window.Helpers && window.Helpers.Knowledge;
+          const corrections = (knowledge && typeof knowledge.getCorrections === "function")
+            ? knowledge.getCorrections()
+            : [];
+          const metrics = (knowledge && typeof knowledge.getMetrics === "function")
+            ? knowledge.getMetrics()
+            : {};
+
+          const correctionsList = Array.isArray(corrections) && corrections.length > 0
+            ? corrections.map(function (c) {
+                return "- " + c;
+              }).join("\n")
+            : "";
+          const correctionsStr = correctionsList ? "Corrections:\n" + correctionsList : "Corrections:\n";
+          const metricsStr = "\nMetrics:\n" + JSON.stringify(metrics || {}, null, 2);
+          inputs[inputName] = correctionsStr + metricsStr;
+        } else if (inputName === "DATE") {
+          inputs[inputName] = new Date().toISOString().slice(0, 10);
+        } else {
+          inputs[inputName] = "";
+        }
+      } else if (typeof source === "string" && source.startsWith("agent:")) {
+        const dep = source.slice(6);
+        const up = artifacts[dep];
+        if (!up) {
+          throw new Error("Missing required input '" + inputName + "' from agent '" + dep + "'");
+        }
+        const keys = Object.keys(up);
+        inputs[inputName] = keys.length > 0 ? (up[keys[0]] ?? "") : "";
+      } else {
+        inputs[inputName] = "";
+      }
+    }
+
+    return inputs;
+  }
+
+  /**
+   * Render an agent's prompt by replacing {{VAR}} placeholders with inputs[VAR].
+   */
+  function renderPrompt(promptText, inputs) {
+    if (typeof promptText !== "string") return "";
+    return promptText.replace(/\{\{\s*([\w-]+)\s*\}\}/g, function (_match, varName) {
+      return String(inputs[varName] ?? "");
+    });
+  }
+
+  /**
+   * Extract primary output text (value of the first key in the artifact).
+   */
+  function getPrimaryOutput(artifactEntry) {
+    if (!artifactEntry || typeof artifactEntry !== "object") return "";
+    const keys = Object.keys(artifactEntry);
+    if (keys.length === 0) return "";
+    const val = artifactEntry[keys[0]];
+    return typeof val === "string" ? val : (val != null ? String(val) : "");
+  }
+
+  /**
+   * Parse CSV delegating to window.Helpers.parseCSV.
+   */
+  function parseCSV(text) {
+    if (!window.Helpers || typeof window.Helpers.parseCSV !== "function") {
+      throw new Error("Analyst engine not loaded: helpers.js/agents.js missing or incomplete.");
+    }
+    return window.Helpers.parseCSV(text);
+  }
+
+  /**
+   * Generic DAG analysis runner.
    * dataset = {name: string, text: string}
-   * Returns Promise<string> (markdown report)
+   * Returns Promise<string>
    */
   async function runAnalysis(dataset, question, onProgress) {
-    const ds = parseCSV(dataset.text);
-    const labels = [
-      "framing",
-      "profiling",
-      "hypothesis",
-      "planning",
-      "executing",
-      "narrating",
-      "verifying",
-      "validating",
-      "reporting"
-    ];
-
-    function mark(i) {
-      if (typeof onProgress === "function") {
-        onProgress(labels[i], i + 1, 9);
-      }
+    if (!window.Helpers || !window.AgentRegistry || !Array.isArray(window.AgentRegistry.agents)) {
+      throw new Error("Analyst engine not loaded: helpers.js/agents.js missing or incomplete.");
     }
 
-    // Step 2 profile is computed deterministically
-    const profile = profileDataset(ds);
-    const profileText = JSON.stringify(profile);
+    const agents = window.AgentRegistry.agents;
+    validateRegistry(agents);
+    const tiers = computeTiers(agents);
+    const total = agents.length;
 
-    const datasetSummary = "Dataset: " + ds.columns.length + " columns, " + ds.rowCount + " rows. Columns: " +
-      profile.columns.map((c) => c.name + " (" + c.dtype + ")").join(", ") + ".";
+    let artifacts = {};
+    let done = [];
 
-    // 1 framing (LLM, system "You are a data analyst. Be concise.")
-    mark(0);
-    const framingPrompt = "Question: " + question + "\n" + datasetSummary + "\nProvide a concise analysis framing brief outlining the analytical scope and goals.";
-    const brief = await callLLM("You are a data analyst. Be concise.", framingPrompt);
-
-    // 2 profiler (deterministic)
-    mark(1);
-    // Already profiled into profile / profileText
-
-    // 3 hypothesis (LLM)
-    mark(2);
-    const hypothesisPrompt = "Framing brief: " + brief + "\nDataset profile: " + profileText + "\nPropose up to 3 short testable hypotheses relevant to the question: \"" + question + "\".";
-    const hypotheses = await callLLM("You are a data analyst. Be concise.", hypothesisPrompt);
-
-    // 4 planner (LLM)
-    mark(3);
-    const plannerPrompt = "Dataset profile: " + profileText + "\nHypotheses: " + hypotheses + "\nQuestion: \"" + question + "\"\n\nReturn ONLY a JSON array (no prose, no fences) of at most 6 steps: {\"title\": string, \"op\": one of count|sum|mean|group_count|group_sum, \"column\": optional numeric column for sum|mean, \"groupBy\": optional column for group_count|group_sum}.";
-    const planRaw = await callLLM("You are a data analyst. Plan data aggregation steps.", plannerPrompt);
-
-    let plan;
     try {
-      plan = parseJsonDefensively(planRaw);
-    } catch (e) {
-      throw new Error("Planner returned an invalid step: " + e.message);
-    }
-
-    if (!Array.isArray(plan)) {
-      throw new Error("Planner returned an invalid step: output was not a JSON array");
-    }
-
-    const steps = plan.slice(0, 6);
-    if (steps.length === 0) {
-      throw new Error("Planner returned an invalid step: empty plan array");
-    }
-
-    const validOps = new Set(["count", "sum", "mean", "group_count", "group_sum"]);
-    for (const step of steps) {
-      if (!step || typeof step !== "object" || !validOps.has(step.op)) {
-        throw new Error("Planner returned an invalid step: " + (step && step.op ? step.op : "missing or invalid op"));
+      const savedStateRaw = localStorage.getItem("orcb_run_state");
+      if (savedStateRaw) {
+        const savedState = JSON.parse(savedStateRaw);
+        if (
+          savedState &&
+          typeof savedState === "object" &&
+          savedState.datasetName === dataset.name &&
+          savedState.question === question &&
+          savedState.artifacts &&
+          typeof savedState.artifacts === "object" &&
+          Array.isArray(savedState.done)
+        ) {
+          artifacts = savedState.artifacts;
+          done = savedState.done.slice();
+        }
       }
-    }
-
-    // 5 executor (deterministic)
-    mark(4);
-    function findColIndex(colName) {
-      if (!colName) return -1;
-      const target = String(colName).trim().toLowerCase();
-      for (let i = 0; i < ds.columns.length; i++) {
-        if (ds.columns[i].toLowerCase() === target) return i;
-      }
-      for (let i = 0; i < ds.columns.length; i++) {
-        if (ds.columns[i].toLowerCase().includes(target) || target.includes(ds.columns[i].toLowerCase())) return i;
-      }
-      return -1;
-    }
-
-    const resultSections = [];
-    for (let sIdx = 0; sIdx < steps.length; sIdx++) {
-      const step = steps[sIdx];
-      const title = step.title ? String(step.title).trim() : ("Step " + (sIdx + 1) + ": " + step.op);
-      let sectionMd = "## " + title + "\n\n";
-
-      if (step.op === "count") {
-        sectionMd += "| Metric | Value |\n|---|---|\n| Total Row Count | " + ds.rowCount + " |";
-      } else if (step.op === "sum") {
-        const colIdx = findColIndex(step.column);
-        const colName = colIdx >= 0 ? ds.columns[colIdx] : (step.column || "Unknown");
-        let sum = 0;
-        let validCount = 0;
-        if (colIdx >= 0) {
-          for (let r = 0; r < ds.rows.length; r++) {
-            const val = parseFloat(ds.rows[r][colIdx]);
-            if (!isNaN(val) && isFinite(val)) {
-              sum += val;
-              validCount++;
-            }
-          }
-        }
-        const roundedSum = Math.round(sum * 1000) / 1000;
-        sectionMd += "| Column | Sum | Count of Numbers |\n|---|---|---|\n| " + colName + " | " + roundedSum + " | " + validCount + " |";
-      } else if (step.op === "mean") {
-        const colIdx = findColIndex(step.column);
-        const colName = colIdx >= 0 ? ds.columns[colIdx] : (step.column || "Unknown");
-        let sum = 0;
-        let validCount = 0;
-        if (colIdx >= 0) {
-          for (let r = 0; r < ds.rows.length; r++) {
-            const val = parseFloat(ds.rows[r][colIdx]);
-            if (!isNaN(val) && isFinite(val)) {
-              sum += val;
-              validCount++;
-            }
-          }
-        }
-        const mean = validCount > 0 ? (Math.round((sum / validCount) * 1000) / 1000) : 0;
-        sectionMd += "| Column | Mean | Count of Numbers |\n|---|---|---|\n| " + colName + " | " + mean + " | " + validCount + " |";
-      } else if (step.op === "group_count") {
-        const groupColIdx = findColIndex(step.groupBy);
-        const groupColName = groupColIdx >= 0 ? ds.columns[groupColIdx] : (step.groupBy || "Group");
-        const counts = new Map();
-        for (let r = 0; r < ds.rows.length; r++) {
-          const raw = groupColIdx >= 0 ? ds.rows[r][groupColIdx] : "";
-          const key = (raw !== null && raw !== undefined && String(raw).trim() !== "") ? String(raw).trim() : "(empty)";
-          counts.set(key, (counts.get(key) || 0) + 1);
-        }
-        const topGroups = Array.from(counts.entries()).sort((a, b) => b[1] - a[1]).slice(0, 10);
-        sectionMd += "| " + groupColName + " | Count |\n|---|---|\n";
-        if (topGroups.length === 0) {
-          sectionMd += "| (none) | 0 |\n";
-        } else {
-          topGroups.forEach(([k, cnt]) => {
-            sectionMd += "| " + k.replace(/\|/g, "/") + " | " + cnt + " |\n";
-          });
-        }
-        sectionMd = sectionMd.trimEnd();
-      } else if (step.op === "group_sum") {
-        const groupColIdx = findColIndex(step.groupBy);
-        const groupColName = groupColIdx >= 0 ? ds.columns[groupColIdx] : (step.groupBy || "Group");
-        let sumColIdx = findColIndex(step.column);
-        if (sumColIdx === -1) {
-          for (let c = 0; c < profile.columns.length; c++) {
-            if (profile.columns[c].dtype === "number") {
-              sumColIdx = c;
-              break;
-            }
-          }
-        }
-        const sumColName = sumColIdx >= 0 ? ds.columns[sumColIdx] : (step.column || "Value");
-        const sums = new Map();
-        for (let r = 0; r < ds.rows.length; r++) {
-          const rawGroup = groupColIdx >= 0 ? ds.rows[r][groupColIdx] : "";
-          const groupKey = (rawGroup !== null && rawGroup !== undefined && String(rawGroup).trim() !== "") ? String(rawGroup).trim() : "(empty)";
-          let numVal = 0;
-          if (sumColIdx >= 0) {
-            const parsed = parseFloat(ds.rows[r][sumColIdx]);
-            if (!isNaN(parsed) && isFinite(parsed)) {
-              numVal = parsed;
-            }
-          }
-          sums.set(groupKey, (sums.get(groupKey) || 0) + numVal);
-        }
-        const topGroups = Array.from(sums.entries()).sort((a, b) => b[1] - a[1]).slice(0, 10);
-        sectionMd += "| " + groupColName + " | Sum of " + sumColName + " |\n|---|---|\n";
-        if (topGroups.length === 0) {
-          sectionMd += "| (none) | 0 |\n";
-        } else {
-          topGroups.forEach(([k, total]) => {
-            const rounded = Math.round(total * 1000) / 1000;
-            sectionMd += "| " + k.replace(/\|/g, "/") + " | " + rounded + " |\n";
-          });
-        }
-        sectionMd = sectionMd.trimEnd();
-      }
-
-      resultSections.push(sectionMd);
-    }
-    const resultsMd = resultSections.join("\n\n");
-
-    // 6 narrator (LLM)
-    mark(5);
-    const narratorPrompt = "Question: " + question + "\n\nExecution results:\n" + resultsMd + "\n\nNarrate the key findings from these results. Cite specific numbers from the tables.";
-    const findings = await callLLM("You are a data analyst. State findings clearly with precise numbers.", narratorPrompt);
-
-    // 7 verifier (LLM)
-    mark(6);
-    const verifierPrompt = "Raw calculation results:\n" + resultsMd + "\n\nDraft findings:\n" + findings + "\n\nRe-check every number mentioned in the draft findings against the raw calculation results. Output the verified findings, correcting any numbers that do not match the raw data.";
-    const verifiedFindings = await callLLM("You are a data analyst verifying numbers against raw calculation results.", verifierPrompt);
-
-    // 8 validator (LLM)
-    mark(7);
-    const validatorPrompt = "Question: " + question + "\nRaw results:\n" + resultsMd + "\nVerified findings:\n" + verifiedFindings + "\n\nValidate whether the findings directly address the question and accurately reflect the results. Reply with ONLY this JSON, nothing else: {\"verdict\": \"pass\" or \"fail\", \"notes\": \"...\"}";
-    const validationRaw = await callLLM("You are a quality validator evaluating a data analysis.", validatorPrompt);
-
-    let validationObj = null;
-    try {
-      validationObj = parseJsonDefensively(validationRaw);
     } catch (_) {
-      if (validationRaw.toLowerCase().includes('"verdict": "fail"') || validationRaw.toLowerCase().includes('"verdict":"fail"')) {
-        throw new Error("Analysis failed validation: " + validationRaw);
+      artifacts = {};
+      done = [];
+    }
+
+    const parsed = window.Helpers.parseCSV(dataset.text);
+
+    const flatAgents = [];
+    for (const tier of tiers) {
+      for (const agent of tier) {
+        flatAgents.push(agent);
       }
     }
 
-    if (validationObj && String(validationObj.verdict).toLowerCase().trim() === "fail") {
-      throw new Error("Analysis failed validation: " + (validationObj.notes || ""));
+    let lastExecutedAgentName = null;
+
+    for (const agent of flatAgents) {
+      if (done.includes(agent.name)) {
+        lastExecutedAgentName = agent.name;
+        continue;
+      }
+
+      if (typeof onProgress === "function") {
+        onProgress(agent.name, done.length + 1, total);
+      }
+
+      try {
+        const inputs = resolveInputs(agent, question, artifacts);
+        let text = "";
+
+        if (agent.kind === "deterministic") {
+          const fnName = agent.function || ({ "dataset-profiler": "profileDataset" })[agent.name];
+          const fn = window.Helpers && window.Helpers[fnName];
+          if (typeof fn !== "function") {
+            throw new Error("Unknown helper function '" + fnName + "'");
+          }
+          const result = (fnName === "profileDataset")
+            ? fn(parsed)
+            : fn({ dataset: dataset, parsed: parsed, artifacts: artifacts, inputs: inputs });
+          text = (typeof result === "string") ? result : JSON.stringify(result, null, 2);
+        } else {
+          const rendered = renderPrompt(agent.prompt, inputs);
+          text = await callLLM(rendered);
+
+          if (agent.needsCompute) {
+            const computeMatch = text.match(/```computejson\s*([\s\S]*?)```/);
+            if (computeMatch) {
+              let opsObj = {};
+              try {
+                opsObj = JSON.parse(computeMatch[1]);
+              } catch (_) {
+                opsObj = parseJsonDefensively(computeMatch[1]);
+              }
+              const ops = (opsObj && Array.isArray(opsObj.ops)) ? opsObj.ops : (opsObj && opsObj.ops) || [];
+              const tables = window.Helpers.executeOps(parsed, ops);
+              const rePrompt = rendered + "\n\n## Computed results (exact — use these numbers, do not recompute)\n" + tables;
+              text = await callLLM(rePrompt);
+            }
+          }
+        }
+
+        if (agent.name === "chart-maker") {
+          let spec;
+          try {
+            spec = JSON.parse(text);
+          } catch (_) {
+            spec = parseJsonDefensively(text);
+          }
+          const charts = window.Helpers.renderChartSpecs(spec);
+          artifacts["__charts__"] = charts;
+        }
+
+        // Chart markers are replaced in the final assembled report (see below),
+        // so any agent may place <!--CHART:<key>--> markers.
+
+        artifacts[agent.name] = {};
+        const outputs = Array.isArray(agent.outputs) ? agent.outputs : [];
+        if (outputs.length > 0) {
+          for (const out of outputs) {
+            if (out && out.key) {
+              artifacts[agent.name][out.key] = text;
+            }
+          }
+        } else {
+          artifacts[agent.name]["output"] = text;
+        }
+
+        if (agent.name === "validation") {
+          let v;
+          try {
+            v = JSON.parse(text);
+          } catch (_) {
+            v = parseJsonDefensively(text);
+          }
+          if (!v || v.verdict !== "pass") {
+            throw new Error("Analysis failed validation: " + ((v && v.notes) || "no notes"));
+          }
+        }
+
+        lastExecutedAgentName = agent.name;
+        done.push(agent.name);
+
+        try {
+          localStorage.setItem("orcb_run_state", JSON.stringify({
+            datasetName: dataset.name,
+            question: question,
+            artifacts: artifacts,
+            done: done
+          }));
+        } catch (_) {}
+      } catch (err) {
+        if (agent.critical !== false) {
+          throw err;
+        } else {
+          artifacts[agent.name] = {
+            _status: "degraded",
+            error: String((err && err.message) || err)
+          };
+          lastExecutedAgentName = agent.name;
+          done.push(agent.name);
+
+          try {
+            localStorage.setItem("orcb_run_state", JSON.stringify({
+              datasetName: dataset.name,
+              question: question,
+              artifacts: artifacts,
+              done: done
+            }));
+          } catch (_) {}
+        }
+      }
     }
 
-    // 9 reporter (LLM)
-    mark(8);
-    const reporterPrompt = "Question: " + question + "\nVerified findings:\n" + verifiedFindings + "\nExecution results:\n" + resultsMd + "\n\nGenerate a comprehensive markdown report. Include a title, executive summary, key findings with exact numbers, formatted result tables, and caveats/methodology notes.";
-    const report = await callLLM("You are an executive data analyst writing a final report.", reporterPrompt);
+    try {
+      localStorage.removeItem("orcb_run_state");
+    } catch (_) {}
 
-    return report;
+    // Final report: the repo's terminal narrative agent is comms-drafter
+    // (step 19); storytelling is the fallback, then the last executed agent.
+    let finalReport = "";
+    if (artifacts["comms-drafter"]) {
+      finalReport = getPrimaryOutput(artifacts["comms-drafter"]);
+    } else if (artifacts["storytelling"]) {
+      finalReport = getPrimaryOutput(artifacts["storytelling"]);
+    } else if (lastExecutedAgentName && artifacts[lastExecutedAgentName]) {
+      finalReport = getPrimaryOutput(artifacts[lastExecutedAgentName]);
+    }
+
+    // Replace any <!--CHART:<key>--> markers with the rendered SVG charts
+    // (charts are generated by our own code, never by model text).
+    const chartMap = artifacts["__charts__"];
+    if (chartMap && typeof chartMap === "object") {
+      finalReport = finalReport.replace(/<!--CHART:([\w-]+)-->/g, function (_m, k) {
+        return (typeof chartMap[k] === "string" && chartMap[k].indexOf("<svg") !== -1) ? chartMap[k] : "";
+      });
+      // Deterministically append a Charts section for any rendered charts,
+      // wrapped so the chat renderer can pass them through safely.
+      const chartKeys = Object.keys(chartMap).filter(function (k) {
+        return typeof chartMap[k] === "string" && chartMap[k].indexOf("<svg") !== -1;
+      });
+      if (chartKeys.length > 0) {
+        finalReport += "\n\n## Charts\n" + chartKeys.map(function (k) {
+          return '<div class="orcb-chart" data-run="1">' + chartMap[k] + "</div>";
+        }).join("\n\n");
+      }
+    }
+
+    return finalReport;
   }
-
-  const Analyst = {
-    runAnalysis: runAnalysis,
-    parseCSV: parseCSV
-  };
 
   if (typeof window !== "undefined") {
-    window.Analyst = Analyst;
-  }
-  if (typeof module !== "undefined" && module.exports) {
-    module.exports = {
-      Analyst: Analyst,
-      parseCSV: parseCSV,
-      profileDataset: profileDataset,
-      callLLM: callLLM,
-      runAnalysis: runAnalysis
+    window.Analyst = {
+      runAnalysis: runAnalysis,
+      parseCSV: parseCSV
     };
   }
 })();

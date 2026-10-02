@@ -111,8 +111,18 @@ document.addEventListener("DOMContentLoaded", () => {
 
   function renderMarkdown(rawText) {
     if (!rawText) return "";
-    const escaped = escapeHtml(rawText);
     const nonce = Math.random().toString(36).slice(2);
+    // Chart divs are appended by the analyst runner (our own generated SVG,
+    // never model text). Extract them before escaping so they render as charts.
+    // The data-run="1" attribute is only ever added by the runner.
+    const chartPrefix = `__CH_${nonce}_`;
+    const charts = [];
+    rawText = String(rawText).replace(/<div class="orcb-chart" data-run="1">([\s\S]*?)<\/div>/g, (match, svg) => {
+      const placeholder = `${chartPrefix}${charts.length}__`;
+      charts.push(`<div class="orcb-chart">${svg}</div>`);
+      return placeholder;
+    });
+    const escaped = escapeHtml(rawText);
     const blockPrefix = `__CB_${nonce}_`;
     const inlinePrefix = `__IC_${nonce}_`;
     const codeBlocks = [];
@@ -151,6 +161,10 @@ document.addEventListener("DOMContentLoaded", () => {
 
     codeBlocks.forEach((blockHtml, idx) => {
       text = text.replace(`${blockPrefix}${idx}__`, () => blockHtml);
+    });
+
+    charts.forEach((chartHtml, idx) => {
+      text = text.replace(`${chartPrefix}${idx}__`, () => chartHtml);
     });
 
     return text;
@@ -862,6 +876,10 @@ document.addEventListener("DOMContentLoaded", () => {
   function handleComposerSubmit() {
     const text = userInput ? userInput.value.trim() : "";
     if (!text || (sendBtn && sendBtn.disabled)) return;
+    if (/^remember:/i.test(text)) {
+      handleRemember(text.replace(/^remember:/i, "").trim());
+      return;
+    }
     if (activeDataset) {
       runChatAnalysis(text);
     } else {
@@ -869,9 +887,69 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   }
 
+  function handleRemember(correction) {
+    if (!correction) {
+      showToast("Nothing to remember — type remember: followed by your correction.", true);
+      return;
+    }
+    userInput.value = "";
+    resetTextareaHeight();
+    const userContent = "remember: " + correction;
+    history.push({ role: "user", content: userContent });
+    updateEmptyState(true);
+    chatMessages.appendChild(renderUserMessage(userContent));
+    let saved = false;
+    try {
+      if (window.Helpers && window.Helpers.Knowledge) {
+        window.Helpers.Knowledge.addCorrection(correction);
+        saved = true;
+      }
+    } catch (_) {}
+    const reply = saved
+      ? "Noted — I'll honor that in future analyses."
+      : "I couldn't save that correction (knowledge store unavailable).";
+    chatMessages.appendChild(renderAssistantMessage(reply));
+    history.push({ role: "assistant", content: reply });
+    try {
+      localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
+    } catch (_) {}
+    scrollToBottom();
+    if (userInput) userInput.focus();
+  }
+
+  function clearReportDownload() {
+    if (!analysisProgress) return;
+    const old = analysisProgress.querySelector("[data-report-dl]");
+    if (old) old.remove();
+  }
+
+  function showReportDownload(md) {
+    if (!analysisProgress) return;
+    clearReportDownload();
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = "Download report (.md)";
+    btn.setAttribute("data-report-dl", "true");
+    btn.className = "btn btn-secondary";
+    btn.addEventListener("click", () => {
+      try {
+        if (window.Helpers && typeof window.Helpers.downloadMarkdown === "function") {
+          window.Helpers.downloadMarkdown("analysis-report.md", md);
+        } else {
+          showToast("Download unavailable (helpers not loaded).", true);
+        }
+      } catch (_) {
+        showToast("Download failed.", true);
+      }
+    });
+    analysisProgress.appendChild(btn);
+    analysisProgress.hidden = false;
+  }
+
   async function runChatAnalysis(question) {
     userInput.value = "";
     resetTextareaHeight();
+    clearReportDownload();
     history.push({ role: "user", content: question });
     updateEmptyState(true);
     chatMessages.appendChild(renderUserMessage(question));
@@ -890,10 +968,11 @@ document.addEventListener("DOMContentLoaded", () => {
       } catch (_) {}
       scrollToBottom();
       showToast("Analysis complete");
+      showReportDownload(md);
     } catch (err) {
+      setAnalysisProgress("");
       showToast((err && err.message) || "Analysis failed", true);
     } finally {
-      setAnalysisProgress("");
       setComposerEnabled(true);
       scrollToBottom();
       if (userInput) userInput.focus();

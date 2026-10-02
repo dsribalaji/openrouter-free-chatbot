@@ -313,3 +313,97 @@ pipeline and the findings come back as ordinary assistant messages.
   while attached, the chat answers as an analyst; × removes the dataset).
 - decision.md: prepend a 2026-10-02 entry for this correction (chat-embedded
   instead of sidebar-based; no backend anywhere).
+
+## Full repo port (added 2026-10-02 — SUPERSEDES the 9-step engine spec; chat-embedded UI stands)
+
+Port the ai-analyst-lab/ai-analyst pipeline faithfully into the browser. Reference
+material: /tmp/ai-analyst-ref (agents/registry.yaml + agents/*/[*.md], helpers/
+for behavior reference). The engine remains the chatbot's OpenRouter key + selected
+free model. Scripts (classic, defer, in order): helpers.js, agents.js, analyst.js,
+app.js. Each of the first three attaches to `window` (`window.Helpers`,
+`window.AgentRegistry`, `window.Analyst`).
+
+### agents.js — `window.AgentRegistry = { agents: [...] }`
+Port ALL agents from the repo's registry.yaml (40). Each entry:
+`{name, step, kind, critical, depends_on[], depends_on_any[], inputs: [{name, source}],
+outputs: [{key}], needsCompute, prompt}`.
+- kind: 'llm' for all, except add ONE new deterministic agent `dataset-profiler`
+  (step 1.5, critical, depends_on [], runs Helpers.profileDataset, outputs [{key:'profile'}]).
+- needsCompute=true for: data-explorer, descriptive-analytics, overtime-trend,
+  cohort-analysis, root-cause-investigator (the repo's LLM+det agents).
+- inputs use the repo's source vocabulary: 'user' | 'system' | 'agent:<name>'.
+  System inputs available: DATASET_PROFILE, KNOWLEDGE (schema/quirks/corrections/metrics),
+  DATE. `agent:<name>` resolves to that agent's primary output text.
+- Prompt adaptation rules: start every prompt with a header line `[agent: <name>]`;
+  keep the repo prompt's intent and unattended tone; REMOVE .knowledge/... paths,
+  outputs/... file writes, and Claude-Code-isms; inputs arrive as {{VAR}} sections
+  which the runner fills; outputs are artifact keys, not files; keep prompts tight.
+- chart-maker (and any visual agent): prompt must demand output be ONLY the chart-spec
+  JSON: `{"charts": [{"key": "chart1", "type": "bar", "title": "...", "labels": [...], "values": [...]}]}`.
+- validation agent: output MUST be only `{"verdict": "pass"|"fail", "notes": "..."}`.
+- No emojis anywhere. Never mention API keys in prompts.
+
+### helpers.js — `window.Helpers = {...}` (no external libs, no DOM except noted)
+- `parseCSV(text)` → {columns, rows, rowCount} (robust: quotes, embedded commas/newlines).
+- `profileDataset(ds)` → {rowCount, columns:[{name, dtype, nullPct, unique}], numericSummaries, sample}.
+- `describeStats(rows, column)` → {min, max, mean, median} for numeric columns.
+- `correlation(rows, colA, colB)` → Pearson r or null.
+- `iqrOutliers(rows, column)` → array of row indexes that are outliers.
+- `executeOps(parsed, ops)` → markdown tables string; ops: {title, op, column?, groupBy?},
+  op ∈ {count, sum, mean, group_count, group_sum}; max 6 ops; group results top 10 desc;
+  non-numeric ignored for sum/mean; pipe chars escaped.
+- `barChartSVG({title, labels, values})`, `lineChartSVG({title, labels, values})` → SVG string
+  (self-contained: inline styles, no external refs, readable at 600px wide).
+- `renderChartSpecs(specs)` → {key: svgString}.
+- `Knowledge` (localStorage `orcb_knowledge`, JSON {datasets:{}, corrections:[], metrics:{}}):
+  getDataset/saveDataset(name, {schema, quirks}), getCorrections/addCorrection(text),
+  getMetrics/setMetric(name, def), all try/catch-guarded.
+- `downloadMarkdown(filename, text)` → Blob download (DOM allowed here).
+
+### analyst.js — generic DAG runner (REWRITES the old 9-step engine)
+- `window.Analyst = { runAnalysis(dataset, question, onProgress), parseCSV }`
+  (parseCSV delegates to Helpers; keep the signature — app.js depends on it).
+- On run: validate registry (dup names, unknown deps, cycles — port the repo's dag.py
+  semantics incl. depends_on_any as OR); compute tiers (Kahn's); execute tier by tier,
+  agents sequentially inside a tier.
+- Input resolution per agent: user → {QUESTION: question}; system → DATASET_PROFILE
+  (from dataset-profiler artifact), KNOWLEDGE (rendered from Helpers.Knowledge),
+  DATE; agent:<name> → upstream artifact text (missing required → throw).
+- kinds: 'llm' → render prompt ({{VAR}} substitution), callLLM (same headers/auth as
+  before: saved key, #model-select model, temperature 0.2, max_tokens 4000);
+  'deterministic' → call the named Helpers function with a ctx {dataset, artifacts}.
+- needsCompute agents: prompt includes the compute-block instruction —
+  'To compute exact numbers, emit a ```computejson fenced block containing
+  {"ops":[{...}]} (ops: count|sum|mean|group_count|group_sum, max 6).'
+  Runner extracts the block, runs Helpers.executeOps, appends
+  "## Computed results (exact — use these numbers, do not recompute)" and re-prompts
+  ONCE for the final answer.
+- Chart pipeline: after any agent named chart-maker completes, parse its chart-spec
+  JSON, Helpers.renderChartSpecs → artifacts; the report-writer prompt instructs
+  placing `<!--CHART:<key>-->` markers; after report-writer, the runner replaces
+  markers with the SVG strings (only markers the runner inserted are replaced —
+  SVGs come from our code, never from LLM text).
+- Artifacts: `{[agentName]: {[outputKey]: text}}` in memory; persisted per run to
+  localStorage `orcb_run_state` ({artifacts, done:[names]}) after each agent for
+  resume; resume continues at the first incomplete agent in tier order.
+- Robustness: 1200ms pacing between LLM calls; on HTTP 429 retry once after 5s;
+  critical agent failure → throw (run fails); non-critical failure → mark degraded,
+  continue. validation agent: parse verdict JSON; fail → throw
+  "Analysis failed validation: <notes>".
+- onProgress(label, done, total) per agent. No emojis. Never log the key.
+
+### app.js changes (chat-embedded UI stands; these are additions)
+- Keep attach/chip/progress/dataset flows exactly as built.
+- `remember:` prefix: if the message starts with "remember:" (case-insensitive),
+  save the remainder via Helpers.Knowledge.addCorrection, reply with a short
+  assistant confirmation ("Noted — I'll honor that in future analyses."), and do
+  NOT run the analyst or the normal chat path.
+- After a successful analysis: show a "Download report (.md)" button inside
+  #analysis-progress (temporary, removed on next run) calling
+  Helpers.downloadMarkdown("analysis-report.md", reportMarkdown).
+- Everything else unchanged.
+
+### Not ported (honest limits — document in README)
+Warehouse connectors (Postgres/Snowflake/BigQuery…), Python-only advanced stats
+(causal inference, power analysis, forecasting), OAuth exports (Google/Notion/Slack),
+the eval harness. README's port-notes section must list these four plainly.

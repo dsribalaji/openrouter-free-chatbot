@@ -1,3 +1,9 @@
+## 2026-10-02 — Full repo port: 40-agent DAG analyst in the browser (SB)
+- **Decided by:** SB ("I want exact repo work to be done in my chatbot")
+- **Decision:** ported the ai-analyst-lab/ai-analyst pipeline faithfully into the chatbot: helpers.js (deterministic functions), agents.js (all 40 agents with contracts/prompts), analyst.js rewritten as a generic DAG runner (registry validation, Kahn tiers, per-agent input resolution, compute-json loop, chart pipeline, localStorage resume, validation gate). Engine remains the chatbot's OpenRouter key + selected free model. app.js gained the remember: correction flow and a Download report (.md) button. Honest limits documented in README (no warehouse connectors, no Python advanced stats, no OAuth exports, no eval harness).
+- **Rationale:** SB wants the repo's exact agent work available in the chat he already uses, with no backend and no Claude Code.
+- **Status:** active
+
 ## 2026-10-02 — Correction: chat-embedded analyst, no sidebar UI, no backend anywhere (SB)
 - **Decided by:** SB (direction change: the chat itself is the analyst)
 - **Decision:** removed the sidebar-based analysis UI entirely. The analyst is chat-embedded: an Attach button in the composer attaches a CSV (chip shows name + row count, × removes it); while attached, every submitted message runs the 9-step analyst pipeline in analyst.js and findings return as ordinary assistant messages. No backend server anywhere; the engine is the chatbot's saved OpenRouter key (orcb_api_key) plus the selected free model.
