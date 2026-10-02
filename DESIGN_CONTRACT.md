@@ -189,3 +189,127 @@ renderAssistantMessage, scrollToBottom — do not duplicate rendering):
   --radius-sm; section separated by a top border like other sections; the
   file input keeps the native control (no custom styling beyond width).
 - No emojis. All copy plain English.
+
+## In-browser analyst (added 2026-10-02 — SUPERSEDES the Data-analysis mode section above)
+
+The analyst runs ENTIRELY in the browser. There is no backend server.
+~/workspace/serverless-analyst has been deleted. The LLM engine is the chatbot's
+own OpenRouter setup: the saved key (localStorage `orcb_api_key`) and the
+currently selected free model in #model-select. CSV input only for now (Excel
+needs an external library, which the zero-external-asset rule forbids).
+
+Files: index.html, styles.css, app.js (existing) + analyst.js (new).
+analyst.js exposes `window.Analyst = { runAnalysis(file, question, onProgress) }`
+returning Promise<string> (the report markdown). Load order in index.html:
+analyst.js (defer) BEFORE app.js (defer).
+
+### analyst.js contents (no external libraries, no emojis in strings)
+
+1. `parseCSV(text)` — small robust parser (quoted fields, commas/newlines inside
+   quotes, \r\n line endings) → `{columns: string[], rows: string[][], rowCount}`.
+   Throw `Error("Could not parse the CSV…")` on empty/unparseable input.
+2. `profileDataset(ds)` — deterministic, no LLM →
+   `{rowCount, columns: [{name, dtype: 'number'|'date'|'text', nullPct, unique}], numericSummaries: {col: {min, max, mean}}, sample: first 5 rows as objects}`.
+   dtype sniff: number if every non-empty value parses as a number; date if
+   Date.parse succeeds on >80% of non-empty values; else text.
+3. `callLLM(systemPrompt, userPrompt)` — POST
+   `https://openrouter.ai/api/v1/chat/completions` with the saved key,
+   `model` = current `#model-select` value, headers `Authorization: Bearer`,
+   `Content-Type`, `HTTP-Referer: location.origin`, `X-Title: "Ruby Free Chatbot"`.
+   Body `{model, messages: [{role:'system',...},{role:'user',...}], temperature: 0.2, max_tokens: 4000}`.
+   Return the assistant text; throw on !ok with the server's error message.
+   Throw `Error("Add your OpenRouter API key first.")` when no key is saved.
+4. Pipeline — sequential, each step awaited; `onProgress(label, done, total)` called
+   per step (9 steps):
+   1. `framing` (LLM): question + dataset summary (columns, row count) → short brief.
+   2. `profiler` (deterministic): profileDataset.
+   3. `hypothesis` (LLM): brief + profile → up to 3 testable hypotheses.
+   4. `planner` (LLM): → JSON ONLY, an array ≤6 of
+      `{title, op, column?, groupBy?}` where op ∈ {count, sum, mean, group_count, group_sum}.
+      Parse defensively (strip ``` fences before JSON.parse).
+   5. `executor` (deterministic): run each planned op over the rows —
+      count → rowCount; sum/mean → numeric column; group_count/group_sum →
+      top 10 groups sorted desc. Produce markdown tables of the results.
+   6. `narrator` (LLM): results tables → findings markdown with the numbers.
+   7. `verifier` (LLM): findings + raw result tables → re-check every number,
+      list corrections or confirm.
+   8. `validator` (LLM): → output MUST be only
+      `{"verdict": "pass"|"fail", "notes": "..."}`; if verdict is fail, throw
+      `Error("Analysis failed validation: " + notes)`.
+   9. `reporter` (LLM): everything → full markdown report (title, key findings
+      with numbers, result tables, caveats). Return the markdown.
+   Prompts are tight, unattended-execution tone, adapted from the ai-analyst
+   agent contracts (framing / hypothesis / planning / verification / validation /
+   reporting). Never log the API key.
+
+### UI changes (chatbot repo)
+
+- index.html: REMOVE the backend-url, backend-key, and save-backend-btn rows.
+  The `.sidebar-section.backend-section` keeps: h3 "Data analysis", a short hint
+  ("Runs in your browser using your OpenRouter key and the selected free model."),
+  `label`+`input#dataset-file` (type=file, accept=".csv"), `label`+`textarea#analysis-question`
+  (rows=2), `button#analyze-btn` ("Analyze"), `div#analysis-status` (aria-live="polite").
+- app.js: DELETE the backend fetch/poll code (POST /datasets, polling, X-API-Key).
+  Wire `#analyze-btn`: require a `.csv` file (else toast "Please choose a CSV file —
+  Excel support is coming later.") and a non-empty question; disable the button;
+  read the file as text; `await window.Analyst.runAnalysis(file, question, onProgress)`;
+  onProgress sets `#analysis-status` text ("Step 3/9: planning…");
+  on success renderAssistantMessage("## Data analysis report\n\n" + md),
+  status "Done.", toast "Analysis complete"; on error status shows the message
+  and an error toast. Re-enable the button on every path.
+- styles.css: remove rules that only served the deleted backend-settings rows;
+  keep everything else.
+- README.md: rewrite the "Data analysis mode" section for the in-browser design
+  (no backend, CSV only, uses the saved OpenRouter key + selected model).
+- decision.md: prepend a 2026-10-02 entry recording the pivot (serverless folder
+  removed; analyst runs in-browser on the chatbot's OpenRouter key).
+
+## Chat-embedded analyst (added 2026-10-02 — the chat IS the analyst; SUPERSEDES the sidebar UI described in the In-browser analyst section)
+
+There is NO sidebar analysis section and NO separate Analyze button/question box.
+The main chat itself performs analysis: the user attaches a CSV in the composer,
+then just chats. While a dataset is attached, every message runs the analyst
+pipeline and the findings come back as ordinary assistant messages.
+
+- The analyst.js ENGINE spec from the previous section stands, with two changes:
+  (a) expose `window.Analyst.parseCSV` as well as `window.Analyst.runAnalysis`;
+  (b) `runAnalysis(dataset, question, onProgress)` takes
+  `dataset = {name: string, text: string}` (CSV text, not a File).
+- index.html:
+  - DELETE the entire `.sidebar-section.backend-section` (backend-url, backend-key,
+    save-backend-btn, dataset-file, analysis-question, analyze-btn, analysis-status —
+    all of it).
+  - In `form#composer`, before the textarea: `button#attach-btn` (type="button",
+    text "Attach", title "Attach a CSV dataset", secondary style) and a hidden
+    `input#chat-file-input` (type="file", accept=".csv").
+  - Between `#chat-messages` and the composer: `div#dataset-chip` (hidden by default)
+    containing `span#dataset-chip-label` and `button#clear-dataset-btn` ("×",
+    aria-label "Remove dataset"); and `div#analysis-progress` (hidden by default,
+    muted small text, aria-live="polite").
+- app.js (inside the existing DOMContentLoaded closure):
+  - `#attach-btn` click → `#chat-file-input` click. On file chosen: must end in
+    `.csv` (else toast "Please choose a CSV file — Excel support is coming later.");
+    read as text; `window.Analyst.parseCSV(text)` (throws on bad input → toast the
+    message); store as closure-scope `activeDataset = {name, text}` AND persist
+    `localStorage["orcb_dataset"] = JSON.stringify({name, text})` inside try/catch
+    (quota errors → keep memory-only); show `#dataset-chip` with label
+    `"{name} — {rows} rows"`; toast "Dataset attached — ask me anything about it.".
+    On load: restore `orcb_dataset` if present (re-parse; on failure clear it).
+  - `#clear-dataset-btn`: clear activeDataset + localStorage, hide chip,
+    toast "Dataset removed".
+  - Form submit: if `activeDataset` is set → analyst path: render the user message
+    normally, disable the composer, show `#analysis-progress` ("Analyzing… step 1/9"),
+    `await window.Analyst.runAnalysis(activeDataset, question, onProgress)` with
+    onProgress updating `#analysis-progress` text ("Analyzing… step 3/9: planning");
+    on success hide progress, renderAssistantMessage("## Data analysis report\n\n" + md)
+    (persisted to history like normal messages), toast "Analysis complete";
+    on error hide progress, error toast with the message. Re-enable the composer
+    on every path.
+  - If no dataset is attached: the existing OpenRouter chat flow, unchanged.
+- styles.css: style `#attach-btn` (secondary), `#dataset-chip` (pill: --panel-2 bg,
+  --border, --radius, small text; × button muted), `#analysis-progress` (muted small,
+  padding); remove any rules that only served the deleted backend-section.
+- README.md: describe the chat-embedded analyst (attach a CSV in the composer;
+  while attached, the chat answers as an analyst; × removes the dataset).
+- decision.md: prepend a 2026-10-02 entry for this correction (chat-embedded
+  instead of sidebar-based; no backend anywhere).

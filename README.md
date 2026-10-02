@@ -33,15 +33,10 @@ external assets — the only network calls at runtime go to `openrouter.ai`.
 
 ## Data analysis mode
 
-The sidebar's **Data analysis** section connects the chatbot to the
-serverless-analyst backend (SB's agentic data-analysis platform):
+The chatbot includes a chat-embedded analyst that runs entirely in your browser:
 
-1. Set the **Backend URL** (default `http://localhost:8000` for local runs) and
-   the optional **Backend key**, then save.
-2. Choose a CSV/Excel dataset, type your question, and hit **Analyze**.
-3. The chatbot uploads the file, starts the 8-step agentic pipeline, shows live
-   progress, and renders the final report in the chat when done.
-
-Run the backend locally with:
-`SLA_BLOB_BACKEND=local uvicorn slanalyst.api.app:app --reload`
-from `~/workspace/serverless-analyst` (see its README for cloud deploys).
+1. Attach a CSV dataset using the **Attach** button in the composer.
+2. While a dataset is attached (indicated by the dataset chip showing the file name and row count), every message you send runs the 9-step analyst pipeline (framing → profiling → hypothesis → planning → execution → narration → verification → validation → report) directly in your browser using your OpenRouter API key and selected free model.
+3. The resulting analysis is delivered as an assistant report message directly into the chat conversation.
+4. Click the **×** on the dataset chip to remove the attached dataset.
+5. The attached dataset persists in the browser's local storage across page refreshes.

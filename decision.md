@@ -1,3 +1,9 @@
+## 2026-10-02 — Correction: chat-embedded analyst, no sidebar UI, no backend anywhere (SB)
+- **Decided by:** SB (direction change: the chat itself is the analyst)
+- **Decision:** removed the sidebar-based analysis UI entirely. The analyst is chat-embedded: an Attach button in the composer attaches a CSV (chip shows name + row count, × removes it); while attached, every submitted message runs the 9-step analyst pipeline in analyst.js and findings return as ordinary assistant messages. No backend server anywhere; the engine is the chatbot's saved OpenRouter key (orcb_api_key) plus the selected free model.
+- **Rationale:** the chat is the interface SB already uses — no separate mode, no separate server, one folder.
+- **Status:** active
+
 ## 2026-10-02 — Data-analysis mode added: chatbot drives the serverless-analyst backend (SB, ~20:00 IST)
 - **Decided by:** SB ("Set this up for my chatbot we have done earlier")
 - **Decision:** new sidebar section (backend URL/key settings, dataset upload,
