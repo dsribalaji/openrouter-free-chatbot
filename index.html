@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Free Chatbot — OpenRouter</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <div id="app">
+    <aside class="sidebar">
+      <div class="sidebar-brand">
+        <h1 class="brand-title">Free Chat</h1>
+        <p class="brand-subtitle">OpenRouter · free models only</p>
+      </div>
+
+      <div class="sidebar-content">
+        <div class="sidebar-section">
+          <label for="model-select" class="sidebar-label">Model</label>
+          <select id="model-select" name="model">
+            <option value="" disabled selected>Loading free models…</option>
+          </select>
+          <button id="refresh-models-btn" type="button" class="btn btn-secondary">Refresh</button>
+        </div>
+
+        <div class="sidebar-section">
+          <button id="new-chat-btn" type="button" class="btn btn-secondary">New chat</button>
+          <button id="clear-chat-btn" type="button" class="btn btn-secondary">Clear chat</button>
+        </div>
+      </div>
+
+      <footer class="sidebar-footer">
+        <div id="key-status" class="key-status">API key saved</div>
+        <button id="change-key-btn" type="button" class="btn btn-secondary">Change key</button>
+      </footer>
+    </aside>
+
+    <div id="sidebar-overlay" class="sidebar-overlay" aria-hidden="true"></div>
+
+    <main class="chat">
+      <header class="chat-header">
+        <div class="chat-header-main">
+          <button id="menu-btn" type="button" class="btn btn-secondary">Menu</button>
+          <span class="chat-header-title">Free Chatbot</span>
+          <span id="model-name-badge" class="model-badge"></span>
+        </div>
+      </header>
+
+      <div id="chat-messages" role="log" aria-live="polite">
+        <div id="empty-state" class="empty-state">
+          <h2>Start a conversation</h2>
+          <p>Select a free model from the sidebar to begin chatting. Your API key remains stored securely in your browser.</p>
+        </div>
+      </div>
+
+      <form id="composer">
+        <div class="composer-container">
+          <label for="user-input" class="sr-only">Ask anything…</label>
+          <textarea id="user-input" name="message" rows="1" placeholder="Ask anything…" aria-label="Ask anything…"></textarea>
+          <div class="composer-controls">
+            <button id="stop-btn" type="button" class="btn btn-danger hidden" hidden>Stop</button>
+            <button id="send-btn" type="submit" class="btn btn-accent">Send</button>
+          </div>
+        </div>
+      </form>
+    </main>
+  </div>
+
+  <div id="key-modal" class="modal-overlay hidden" hidden aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="key-modal-heading">
+    <div class="modal-card">
+      <h2 id="key-modal-heading">Enter your OpenRouter API key</h2>
+      <p>Your API key is stored only in this browser's local storage and is sent directly to OpenRouter.</p>
+      <div class="modal-field">
+        <label for="api-key-input" class="modal-label">API Key</label>
+        <input id="api-key-input" type="password" placeholder="sk-or-v1-..." autocomplete="off" spellcheck="false">
+      </div>
+      <div class="modal-actions">
+        <button id="cancel-key-btn" type="button" class="btn btn-secondary">Later</button>
+        <button id="save-key-btn" type="button" class="btn btn-accent">Save key</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>
